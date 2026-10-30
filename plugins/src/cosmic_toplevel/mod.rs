@@ -2,6 +2,7 @@ mod toplevel_handler;
 
 use cctk::cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1::State;
 use cctk::wayland_client::Proxy;
+use cctk::wayland_protocols::ext::workspace::v1::client::ext_workspace_handle_v1::ExtWorkspaceHandleV1;
 use cctk::{sctk::reexports::calloop, toplevel_info::ToplevelInfo};
 use fde::DesktopEntry;
 use freedesktop_desktop_entry as fde;
@@ -20,6 +21,8 @@ use pop_launcher::{
     json_input_stream,
 };
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::hash::Hash;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use self::toplevel_handler::{ToplevelAction, toplevel_handler};
@@ -99,6 +102,9 @@ pub async fn main() {
                                 warn!("no toplevel to remove");
                             }
                         }
+                        ToplevelUpdate::ActiveWorkspaces(active) => {
+                            app.active_workspaces = active;
+                        }
                     }
                 }
             }
@@ -107,11 +113,17 @@ pub async fn main() {
     }
 }
 
+/// Shows the window when workspace data is missing, so it can never become unreachable.
+fn on_active_workspace<T: Eq + Hash>(window: &HashSet<T>, active: &HashSet<T>) -> bool {
+    window.is_empty() || active.is_empty() || !window.is_disjoint(active)
+}
+
 struct App<W> {
     locales: Vec<String>,
     desktop_entries: Vec<DesktopEntry>,
     ids_to_ignore: Vec<u32>,
     toplevels: Vec<Box<ToplevelInfo>>,
+    active_workspaces: HashSet<ExtWorkspaceHandleV1>,
     calloop_tx: calloop::channel::Sender<ToplevelAction>,
     tx: W,
 }
@@ -135,6 +147,7 @@ impl<W: AsyncWrite + Unpin> App<W> {
                 desktop_entries,
                 ids_to_ignore: Vec::new(),
                 toplevels: Vec::new(),
+                active_workspaces: HashSet::new(),
                 calloop_tx,
                 tx,
             },
@@ -184,6 +197,11 @@ impl<W: AsyncWrite + Unpin> App<W> {
         let haystack = query.split_ascii_whitespace().collect::<Vec<&str>>();
 
         for info in &self.toplevels {
+            // An empty query is what alt-tab sends; typed searches still cover all workspaces.
+            if query.is_empty() && !on_active_workspace(&info.workspace, &self.active_workspaces) {
+                continue;
+            }
+
             let appid = fde::unicase::Ascii::new(info.app_id.as_str());
 
             let entry = fde::find_app_by_id(&self.desktop_entries, appid)
@@ -226,5 +244,27 @@ impl<W: AsyncWrite + Unpin> App<W> {
 
         send(&mut self.tx, PluginResponse::Finished).await;
         let _ = self.tx.flush().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::on_active_workspace;
+    use std::collections::HashSet;
+
+    fn set(items: &[u32]) -> HashSet<u32> {
+        items.iter().copied().collect()
+    }
+
+    #[test]
+    fn keeps_only_windows_on_an_active_workspace() {
+        assert!(on_active_workspace(&set(&[1]), &set(&[1, 2])));
+        assert!(!on_active_workspace(&set(&[3]), &set(&[1, 2])));
+    }
+
+    #[test]
+    fn missing_workspace_data_keeps_the_window() {
+        assert!(on_active_workspace(&set(&[]), &set(&[1])));
+        assert!(on_active_workspace(&set(&[1]), &set(&[])));
     }
 }

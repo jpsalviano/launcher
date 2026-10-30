@@ -5,7 +5,11 @@ use cctk::{
     toplevel_info::{ToplevelInfo, ToplevelInfoHandler, ToplevelInfoState},
     toplevel_management::{ToplevelManagerHandler, ToplevelManagerState},
     wayland_client::{self, WEnum},
-    wayland_protocols::ext::foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+    wayland_protocols::ext::{
+        foreign_toplevel_list::v1::client::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1,
+        workspace::v1::client::ext_workspace_handle_v1::{self, ExtWorkspaceHandleV1},
+    },
+    workspace::{WorkspaceHandler, WorkspaceState},
 };
 use sctk::{
     self,
@@ -33,6 +37,7 @@ pub enum ToplevelAction {
 pub enum ToplevelUpdate {
     Info(ToplevelInfo),
     Remove(ExtForeignToplevelHandleV1),
+    ActiveWorkspaces(HashSet<ExtWorkspaceHandleV1>),
 }
 
 struct AppData {
@@ -41,6 +46,7 @@ struct AppData {
     registry_state: RegistryState,
     toplevel_info_state: ToplevelInfoState,
     toplevel_manager_state: ToplevelManagerState,
+    workspace_state: WorkspaceState,
     seat_state: SeatState,
     pending_update: HashSet<ExtForeignToplevelHandleV1>,
 }
@@ -155,6 +161,28 @@ impl ToplevelInfoHandler for AppData {
     }
 }
 
+impl WorkspaceHandler for AppData {
+    fn workspace_state(&mut self) -> &mut WorkspaceState {
+        &mut self.workspace_state
+    }
+
+    fn done(&mut self) {
+        let active = self
+            .workspace_state
+            .workspaces()
+            .filter(|w| w.state.contains(ext_workspace_handle_v1::State::Active))
+            .map(|w| w.handle.clone())
+            .collect();
+
+        if let Err(err) = self
+            .tx
+            .unbounded_send(vec![ToplevelUpdate::ActiveWorkspaces(active)])
+        {
+            warn!("{err}");
+        }
+    }
+}
+
 pub(crate) fn toplevel_handler(
     tx: UnboundedSender<Vec<ToplevelUpdate>>,
     rx: calloop::channel::Channel<ToplevelAction>,
@@ -198,6 +226,7 @@ pub(crate) fn toplevel_handler(
         seat_state: SeatState::new(&globals, &qh),
         toplevel_info_state: ToplevelInfoState::new(&registry_state, &qh),
         toplevel_manager_state: ToplevelManagerState::new(&registry_state, &qh),
+        workspace_state: WorkspaceState::new(&registry_state, &qh),
         registry_state,
         pending_update: HashSet::new(),
     };
@@ -214,3 +243,4 @@ sctk::delegate_seat!(AppData);
 sctk::delegate_registry!(AppData);
 cctk::delegate_toplevel_info!(AppData);
 cctk::delegate_toplevel_manager!(AppData);
+cctk::delegate_workspace!(AppData);
